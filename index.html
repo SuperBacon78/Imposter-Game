@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Imposter Game</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #2c3e50;
+            font-family: sans-serif;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            border: 2px solid #333;
+            z-index: 10;
+        }
+
+        #startButton {
+            background: #ff4757;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            cursor: pointer;
+            border-radius: 5px;
+            font-weight: bold;
+            margin-top: 10px;
+            width: 100%;
+        }
+
+        #startButton:hover {
+            background: #ff6b81;
+        }
+
+        h2 {
+            margin-top: 0;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <h2>Imposter Game</h2>
+        <h3 id="roleText" style="color: #a4b0be;">Connecting to server...</h3>
+        <p><b>WASD</b> to move.</p>
+        <p><b>SPACE</b> to tag.</p>
+        <button id="startButton" onclick="startGame()" style="display:none;">Start Game</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const socket = io();
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        const players = {};
+        let myId = null;
+        let walls = [];
+        let gameActive = false;
+
+        const keys = { w: false, a: false, s: false, d: false };
+        window.addEventListener('keydown', (e) => {
+            if (keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = true;
+            if (e.code === 'Space' && gameActive) socket.emit('tryTag');
+        });
+        window.addEventListener('keyup', (e) => {
+            if (keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = false;
+        });
+
+        function startGame() { socket.emit('startGame'); }
+
+        socket.on('connect', () => {
+            myId = socket.id;
+            document.getElementById('roleText').innerText = "Connected! Waiting to start...";
+            document.getElementById('startButton').style.display = 'block';
+        });
+
+        socket.on('mapData', (serverWalls) => { walls = serverWalls; });
+        socket.on('currentPlayers', (serverPlayers) => { Object.assign(players, serverPlayers); });
+        socket.on('newPlayer', (player) => { players[player.id] = player; });
+        socket.on('playerMoved', (player) => {
+            if (players[player.id]) {
+                players[player.id].x = player.x;
+                players[player.id].y = player.y;
+            }
+        });
+
+        socket.on('gameStarted', (serverPlayers) => {
+            Object.assign(players, serverPlayers);
+            gameActive = true;
+            document.getElementById('startButton').style.display = 'none';
+            const me = players[myId];
+            const roleEl = document.getElementById('roleText');
+            if (me.role === 'imposter') {
+                roleEl.innerText = "YOU ARE THE IMPOSTER";
+                roleEl.style.color = "#ff4757";
+            } else {
+                roleEl.innerText = "YOU ARE A CREWMATE";
+                roleEl.style.color = "#2ed573";
+            }
+        });
+
+        socket.on('playerTagged', (id) => {
+            if (players[id]) players[id].isAlive = false;
+            if (id === myId) {
+                document.getElementById('roleText').innerText = "YOU DIED (GHOST)";
+                document.getElementById('roleText').style.color = "#a4b0be";
+            }
+        });
+
+        socket.on('gameOver', (message) => {
+            gameActive = false;
+            document.getElementById('roleText').innerText = "GAME OVER: " + message;
+            document.getElementById('roleText').style.color = "#f1c40f";
+            document.getElementById('startButton').style.display = 'block';
+            document.getElementById('startButton').innerText = 'Play Again';
+        });
+
+        socket.on('playerDisconnected', (id) => { delete players[id]; });
+
+        function update() {
+            if (!myId || !players[myId] || !players[myId].isAlive) return;
+
+            const me = players[myId];
+            const speed = 6;
+            let moved = false;
+            let newX = me.x;
+            let newY = me.y;
+
+            if (keys.w) { newY -= speed; moved = true; }
+            if (keys.s) { newY += speed; moved = true; }
+            if (keys.a) { newX -= speed; moved = true; }
+            if (keys.d) { newX += speed; moved = true; }
+
+            let canMove = true;
+            const radius = 20;
+            for (let w of walls) {
+                if (newX + radius > w.x && newX - radius < w.x + w.w &&
+                    newY + radius > w.y && newY - radius < w.y + w.h) {
+                    canMove = false;
+                }
+            }
+
+            if (moved && canMove) {
+                me.x = newX;
+                me.y = newY;
+                socket.emit('playerMovement', { x: me.x, y: me.y });
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Set up camera (defaults to center if not connected yet)
+            let cameraX = 0 - canvas.width / 2;
+            let cameraY = 0 - canvas.height / 2;
+
+            if (myId && players[myId]) {
+                cameraX = players[myId].x - canvas.width / 2;
+                cameraY = players[myId].y - canvas.height / 2;
+            }
+
+            // Always draw the grid so we never see a pure black screen
+            ctx.strokeStyle = '#34495e';
+            ctx.lineWidth = 2;
+            const gridSize = 100;
+            const offsetX = cameraX % gridSize;
+            const offsetY = cameraY % gridSize;
+
+            let startX = offsetX < 0 ? -offsetX : gridSize - offsetX;
+            let startY = offsetY < 0 ? -offsetY : gridSize - offsetY;
+
+            for (let x = -startX; x < canvas.width; x += gridSize) {
+                ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+            }
+            for (let y = -startY; y < canvas.height; y += gridSize) {
+                ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+            }
+
+            // Draw boundaries (Red walls)
+            ctx.fillStyle = '#ff4757';
+            for (let w of walls) {
+                ctx.fillRect(w.x - cameraX, w.y - cameraY, w.w, w.h);
+            }
+
+            // Draw players
+            for (let id in players) {
+                const p = players[id];
+                const screenX = p.x - cameraX;
+                const screenY = p.y - cameraY;
+
+                ctx.globalAlpha = p.isAlive ? 1.0 : 0.3;
+
+                ctx.fillStyle = p.color;
+                ctx.beginPath();
+                ctx.arc(screenX, screenY, 20, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'center';
+
+                let label = "Player";
+                if (id === myId) {
+                    label = p.role === 'imposter' ? "You (Imposter)" : "You";
+                } else if (!p.isAlive) {
+                    label = "Ghost";
+                }
+
+                ctx.fillText(label, screenX, screenY - 30);
+            }
+            ctx.globalAlpha = 1.0;
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+        loop();
+    </script>
+</body>
+
+</html>
